@@ -36,7 +36,7 @@ def connect():
     return None
 
 def ping(session_id):
-    print("--- Sending Ping (Keep-Alive) ---")
+    print("--- Sending Ping ---")
     req = {
         'request_type': 3, 
         'session': session_id,
