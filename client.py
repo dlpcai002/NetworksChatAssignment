@@ -105,13 +105,12 @@ def send_message(sock, session, channel_name, message_text):
     
 def send_direct_message(sock, session, recipient_username, message_text):
     request = {
-        "request_type": 10,
+        "request_type": 12,
         "session": session,
         "request_handle": random.randrange(0, 2**32),
-        "recipient": recipient_username,
+        "to_username": recipient_username,
         "message": message_text
     }
-    
     sock.sendto(msgpack.packb(request), SERVER)
     
 
@@ -147,14 +146,15 @@ def receive_messages(sock):
                     content = data.get("message", "")
                     print(f"\n[DM] {from_username}: {content}")
                 elif response_type == 30:
-                    sender = data.get("sender", "Unknown")
+                    sender = data.get("username", "Unknown")
                     content = data.get("message", "")
                     channel = data.get("channel", "Unknown")
                     print(f"\n[{channel}] {sender}: {content}")
                 elif response_type == 20:
-                    print("Message delivered")
-                else:
-                    print(f"\nReceived response type {response_type}: {data}")
+                    if "error" in data:
+                        print("\nError:", data["error"])
+                    else:
+                        print("\nMessage delivered")
                     print("> ", end="")
             
         except Exception as e:
