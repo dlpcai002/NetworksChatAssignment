@@ -7,6 +7,7 @@ import time
 ##NOTES: 
 # 1. Channel info request
 # 2. Leave Channel
+# 3. User message request
 
 #server address and cleartext part
 SERVER = ("csc4026z.link", 51825)
@@ -167,12 +168,12 @@ def main():
     print("Connected. Session= ", session)
     
     #Set user and join channel
-    my_username = "caitlin0211"
+    my_username = "clear-caitlin"
     set_username(sock, session, my_username)
     join_channel(sock, session, channel_name)
     
-    receiver = threading.Thread(target=receive_messages, args=(sock,), daemon=True)
-    receiver.start()
+    print("Registering with server...")
+    time.sleep(1)
     
     print("Commands: Type your message and hit Enter. (Ctrl+C to exit)")
     
@@ -181,6 +182,8 @@ def main():
             ping(sock, session)
             time.sleep(30)  # Ping every 30 seconds
             
+    receiver = threading.Thread(target=receive_messages, args=(sock,), daemon=True)
+    receiver.start()      
     threading.Thread(target=keep_alive, daemon=True).start()
     
     print("CHAT ACTIVE. Use '/dm username message' to send direct messages or just message in channel")
