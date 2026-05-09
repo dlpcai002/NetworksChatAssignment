@@ -1,6 +1,12 @@
 import socket
 import msgpack
 import random  #generate request handles
+import threading 
+import time
+
+##NOTES: 
+# 1. Channel info request
+# 2. Leave Channel
 
 #server address and cleartext part
 SERVER = ("csc4026z.link", 51825)
@@ -17,14 +23,6 @@ def connect(sock):
     #Encode, send request
     sock.sendto(msgpack.packb(request), SERVER)
     
-    #Wait for response
-    response, addr = sock.recvfrom(4096)
-    
-    #Decode response
-    data = msgpack.unpackb(response)
-    
-    #return session ID from server
-    return data["session"]
 
 #send ping, keep alive
 def ping(sock, session):
@@ -39,11 +37,6 @@ def ping(sock, session):
     #encode, send ping
     sock.sendto(msgpack.packb(request), SERVER)
     
-    #wait server response
-    response, addr = sock.recvfrom(4096)
-    
-    #return decoded response
-    return msgpack.unpackb(response)
 
 def set_username(sock, session, username):
     request = {
@@ -54,8 +47,6 @@ def set_username(sock, session, username):
     }
     
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
 
 def list_users(sock, session):
     request = {
@@ -65,8 +56,7 @@ def list_users(sock, session):
     }
     
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+    
 
 
 def list_channels(sock, session):
@@ -77,8 +67,7 @@ def list_channels(sock, session):
     }
     
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+    
 
 def create_channel(sock, session, channel_name):
     request = {
@@ -88,8 +77,7 @@ def create_channel(sock, session, channel_name):
         "channel": channel_name
     }
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+    
 
 def join_channel(sock, session, channel_name):
     request = {
@@ -100,8 +88,7 @@ def join_channel(sock, session, channel_name):
     }
     
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+   
 
 def send_message(sock, session, channel_name, message_text):
     request = {
@@ -115,8 +102,17 @@ def send_message(sock, session, channel_name, message_text):
     
     sock.sendto(msgpack.packb(request), SERVER)
     
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+def send_direct_message(sock, session, recipient_username, message_text):
+    request = {
+        "request_type": 10,
+        "session": session,
+        "request_handle": random.randrange(0, 2**32),
+        "recipient": recipient_username,
+        "message": message_text
+    }
+    
+    sock.sendto(msgpack.packb(request), SERVER)
+    
 
 def disconnect(sock, session):
     request = {
@@ -126,54 +122,94 @@ def disconnect(sock, session):
     }
     
     sock.sendto(msgpack.packb(request), SERVER)
-    response, addr = sock.recvfrom(4096)
-    return msgpack.unpackb(response)
+
+def receive_messages(sock):
+    print("Listening for incoming messages...")
+    while True:
+        try:
+            response, addr = sock.recvfrom(4096)
+            data = msgpack.unpackb(response)
+             
+            if "message" in data:
+                sender = data.get("sender", "Unknown")
+                content = data.get("message", "")
+                
+                if "channel" in data:
+                    channel = data.get("channel", "Unknown")
+                    print(f"\n[{channel}] {sender}: {content}")
+                else:
+                    print(f"\n[DM] {sender}: {content}")
+                    
+                print("> ", end="")
+                 
+            elif "response_type" in data:
+                pass
+            
+        except Exception as e:
+            print(f"Error in receiver: {e}")
+            break
+            
+        #print("\nIncoming messages:", data)
 
 
 def main():
     
-    channel_name = "diyal-test-1"
+    channel_name = "team-chat"
     
     #UDP socket creation
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
     #connect, store session
-    session = connect(sock)
+    connect(sock)
+    reponse, addr = sock.recvfrom(4096)
+    data = msgpack.unpackb(reponse)
+    session = data["session"]
     print("Connected. Session= ", session)
     
-    #test ping
-    response = ping(sock, session)
-    print("Ping response: ", response)
+    #Set user and join channel
+    my_username = "caitlin0211"
+    set_username(sock, session, my_username)
+    join_channel(sock, session, channel_name)
     
-    username_response = set_username(sock, session, "clear-diyal")
-    print("Username response:", username_response)
+    receiver = threading.Thread(target=receive_messages, args=(sock,), daemon=True)
+    receiver.start()
     
-    users_response = list_users(sock, session)
-    print("Users response: ", users_response)
+    print("Commands: Type your message and hit Enter. (Ctrl+C to exit)")
     
-    channel_response = create_channel(sock, session, channel_name)
-    print("Create channel response:", channel_response)
+    def keep_alive():
+        while True:
+            ping(sock, session)
+            time.sleep(30)  # Ping every 30 seconds
+            
+    threading.Thread(target=keep_alive, daemon=True).start()
     
-    channel_response = list_channels(sock, session)
-    print("Channels response: ", channel_response)
+    print("CHAT ACTIVE. Use '/dm username message' to send direct messages or just message in channel")
     
-    join_response = join_channel(sock, session, channel_name)
-    print("Join channel response:", join_response) 
+    try:
+        while True:
+            message_text = input("> ")
+            if message_text.startswith("/dm "):
+                parts = message_text.split(" ", 2)
+                if len(parts) < 3:
+                    print("Usage: /dm username message")
+                    continue
+                recipient_username = parts[1]
+                dm_message = parts[2]
+                send_direct_message(sock, session, recipient_username, dm_message)
+            else:
+                send_message(sock, session, channel_name, message_text)
+                
+            if message_text.lower() == "/exit":
+                break
+            
+    except KeyboardInterrupt:
+        print("\nExiting...")
+           
+    #disconnect_response = disconnect(sock, session)
+    #print("Disconnect response:", disconnect_response)
     
-    message_response = send_message(
-        sock,
-        session,
-        channel_name,
-        "Hello from python client!!!"
-    )
-    
-    print("Channel message response:", message_response)
-    
-    disconnect_response = disconnect(sock, session)
-    print("Disconnect response:", disconnect_response)
-    
-    sock.close()
-    print("Socket closed successfully")
+    #sock.close()
+    #print("Socket closed successfully")
     
 if __name__ == "__main__":
     main()
