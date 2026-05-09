@@ -179,11 +179,14 @@ def main():
     print("Connected. Session= ", session)
     
     #Set user and join channel
-    my_username = "clear-caitlin"
+    my_username = "clear-david"
     set_username(sock, session, my_username)
     time.sleep(0.3)
     sock.recvfrom(4096)  # Consume username set response
     
+    #NB!!!!!!!!!!: comment this out if someone else already created the channel
+    create_channel(sock, session, channel_name)
+
     join_channel(sock, session, channel_name)
     time.sleep(0.3)
     join_resp, _ = sock.recvfrom(4096)  # Consume join channel response
