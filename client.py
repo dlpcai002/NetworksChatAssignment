@@ -130,21 +130,32 @@ def receive_messages(sock):
         try:
             response, addr = sock.recvfrom(4096)
             data = msgpack.unpackb(response)
-             
-            if "message" in data:
-                sender = data.get("sender", "Unknown")
-                content = data.get("message", "")
-                
-                if "channel" in data:
+                 
+            
+            if "response_type" in data:
+                response_type = data["response_type"]
+                if response_type == 35:  # User list response
+                    users = data.get("users", [])
+                    print("\nCurrent users in channel:", ", ".join(users))
+                    print("> ", end="")
+                elif response_type == 26:  # Channel list response
+                    channels = data.get("channels", [])
+                    print("\nAvailable channels:", ", ".join(channels))
+                    print("> ", end="")
+                elif response_type == 33:
+                    from_username = data.get("from_username", "Unknown")
+                    content = data.get("message", "")
+                    print(f"\n[DM] {from_username}: {content}")
+                elif response_type == 30:
+                    sender = data.get("sender", "Unknown")
+                    content = data.get("message", "")
                     channel = data.get("channel", "Unknown")
                     print(f"\n[{channel}] {sender}: {content}")
+                elif response_type == 20:
+                    print("Message delivered")
                 else:
-                    print(f"\n[DM] {sender}: {content}")
-                    
-                print("> ", end="")
-                 
-            elif "response_type" in data:
-                pass
+                    print(f"\nReceived response type {response_type}: {data}")
+                    print("> ", end="")
             
         except Exception as e:
             print(f"Error in receiver: {e}")
@@ -170,7 +181,18 @@ def main():
     #Set user and join channel
     my_username = "clear-caitlin"
     set_username(sock, session, my_username)
+    time.sleep(0.3)
+    sock.recvfrom(4096)  # Consume username set response
+    
     join_channel(sock, session, channel_name)
+    time.sleep(0.3)
+    join_resp, _ = sock.recvfrom(4096)  # Consume join channel response
+    join_data = msgpack.unpackb(join_resp)
+    print("Join response:", join_data)
+    
+    
+    list_users(sock, session)
+    
     
     print("Registering with server...")
     time.sleep(1)
