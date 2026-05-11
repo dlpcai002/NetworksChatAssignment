@@ -4,6 +4,11 @@ import random  #generate request handles
 import threading 
 import time
 
+from encryption import TransportSession, DH_Generate, build_initiation, parse_response, Hash
+import nacl.public
+import base64
+import struct, os
+
 ##NOTES: 
 # 1. Channel info request
 # 2. Leave Channel
@@ -11,6 +16,97 @@ import time
 
 #server address and cleartext part
 SERVER = ("csc4026z.link", 51825)
+SERVER_WG = ("csc4026z.link", 51820)   # WireGuard port
+
+class EncryptedSocket:
+    """
+    Wrapper around a normal UDP socket that automatically encrypts
+    outgoing packets and decrypts incoming packets using the
+    TransportSession object from encryption.py.
+
+    This allows the rest of the chat client to use sendto() and
+    recvfrom() normally without needing to manually handle
+    encryption logic every time a message is sent or received.
+    """
+    def __init__(self, session: TransportSession, sock, server_addr):
+        # Active encrypted transport session containing symmetric keys
+        self.session = session
+        # Underlying UDP socket used for network communication
+        self.sock = sock
+        # Address of the encrypted WireGuard-style server
+        self.server_addr = server_addr
+
+    def sendto(self, data: bytes, addr):
+        """
+        Encrypt outgoing plaintext data before sending it
+        through the UDP socket.
+        """
+        # Encrypt plaintext message using session send key
+        encrypted_packet = self.session.encrypt_message(data)
+        # Send encrypted packet to server
+        self.sock.sendto(encrypted_packet, self.server_addr)
+
+    def recvfrom(self, bufsize):
+        """
+        Receive encrypted data from the UDP socket and decrypt it
+        before returning it to the application.
+        """
+        # Receive encrypted packet from network
+        raw, addr = self.sock.recvfrom(bufsize)
+        # Decrypt packet using session receive key
+        plaintext = self.session.decrypt_message(raw)
+        # Return decrypted data in normal socket format
+        return plaintext, addr
+
+def make_encrypted_socket():
+    # Read client's long-term private key from user
+    print('Enter client private key (base64): ')
+    client_static_priv = base64.b64decode(input())
+    # Generate matching public key from private key
+    client_static_pub  = bytes(nacl.public.PrivateKey(client_static_priv).public_key)
+    # Read server's public key
+    print('Enter server public key (base64): ')
+    server_static_pub  = base64.b64decode(input())
+
+    # Generate temporary ephemeral DH keypair for handshake
+    client_eph_priv, client_eph_pub = DH_Generate()
+
+    # Random identifier for this client session
+    sender_index = struct.unpack('<I', os.urandom(4))[0]
+
+    # Create UDP socket used for encrypted communication
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sock.settimeout(5.0)
+
+    # ---------------- Handshake Phase ----------------
+    
+    # Build WireGuard-style initiation packet
+    packet, ck, h = build_initiation(
+        sender_index, client_static_priv, client_static_pub,
+        server_static_pub, client_eph_priv, client_eph_pub
+    )
+
+    # Send handshake initiation to server
+    raw_sock.sendto(packet, SERVER_WG)
+
+    # Receive handshake response from server
+    response, _ = raw_sock.recvfrom(65535)
+
+    # Derive encryption/decryption session keys
+    send_key, recv_key, receiver_index = parse_response(
+        response, client_eph_priv, client_static_priv,
+        server_static_pub, b'\x00' * 32, ck, h)
+
+    # Create encrypted transport session
+    session = TransportSession(send_key, recv_key, sender_index, receiver_index)
+
+    print("✓ WireGuard handshake complete")
+
+    # Remove timeout after successful handshake
+    raw_sock.settimeout(None)
+
+    # Return encrypted socket wrapper
+    return EncryptedSocket(session, raw_sock, SERVER_WG)
 
 #connection to chat server
 def connect(sock):
@@ -165,12 +261,21 @@ def receive_messages(sock):
 
 
 def main():
-    
+    #User chooses whether they would like to use the Cleartext socket or Encrypted socket
+    print('Would you like use encrypted chat? (Respond with Y/N)')
+    choice = input()
+
+    if(choice == 'Y' or choice == 'y'):
+        #UDP socket creation for Encrypted Chat
+        print('Starting Encrypted Chat...')
+        sock = make_encrypted_socket()
+    elif(choice == 'N' or choice == 'n'):
+        #UDP socket creation for Cleartext Chat
+        print('Starting Cleartext Chat...')
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
     channel_name = "team-chat"
-    
-    #UDP socket creation
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
+
     #connect, store session
     connect(sock)
     reponse, addr = sock.recvfrom(4096)
@@ -191,11 +296,9 @@ def main():
     time.sleep(0.3)
     join_resp, _ = sock.recvfrom(4096)  # Consume join channel response
     join_data = msgpack.unpackb(join_resp)
-    print("Join response:", join_data)
-    
+    print("Join response:", join_data) 
     
     list_users(sock, session)
-    
     
     print("Registering with server...")
     time.sleep(1)
