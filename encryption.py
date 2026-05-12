@@ -14,6 +14,7 @@ import msgpack, random
 CONSTRUCTION = b'Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s'
 IDENTIFIER   = b'WireGuard v1 zx2c4 Jason@zx2c4.com'
 LABEL_MAC1   = b'mac1----'
+LABEL_COOKIE = b"cookie--"
 
 class TransportSession:
     """
@@ -155,6 +156,7 @@ def build_initiation(
     server_static_pub:  bytes,  # the server's long-term public key (pre-shared, from config)
     client_ephemeral_priv: bytes,  # fresh random key just for this handshake
     client_ephemeral_pub:  bytes,
+    mac2: bytes
 ) -> bytes:
     """
     Build the WireGuard handshake initiation packet.
@@ -207,7 +209,9 @@ def build_initiation(
     )
 
     mac1 = Mac(mac1_key, body)
-    mac2 = b'\x00' * 16    # mac2 is only used with a cookie; zero for now
+    
+    global mac1_temp
+    mac1_temp = mac1
 
     return body + mac1 + mac2, chain_key, hash
 
@@ -264,6 +268,34 @@ def parse_response(
 
     return send_key, recv_key, receiver_index
 
+def parse_response_extended(
+    packet: bytes,
+    server_static_pub:     bytes,
+) -> tuple:
+    """
+    Parse a WireGuard extended handshake response packet.
+    Returns (plaintext, receiver_index)
+    """
+
+    msg_type = packet[0]
+    assert msg_type == 3
+
+    receiver_index = struct.unpack('<I', packet[4:8])[0]
+
+    nonce = packet[8:32]
+    encrypted_cookie = packet[32:64]
+
+    cookie_key = Hash(LABEL_COOKIE + server_static_pub)
+
+    cookie = nacl.bindings.crypto_aead_xchacha20poly1305_ietf_decrypt(
+        encrypted_cookie,
+        mac1_temp,
+        nonce,
+        cookie_key
+    )
+
+    return cookie, receiver_index
+
 def test_server_handshake(server_host, server_port, server_static_pub,
                           client_static_priv, client_static_pub):
     client_eph_priv, client_eph_pub = DH_Generate()
@@ -272,7 +304,7 @@ def test_server_handshake(server_host, server_port, server_static_pub,
     # Build + send initiation
     packet, ck, h = build_initiation(
         sender_index, client_static_priv, client_static_pub,
-        server_static_pub, client_eph_priv, client_eph_pub
+        server_static_pub, client_eph_priv, client_eph_pub, b'\x00' * 16
     )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -304,17 +336,76 @@ def test_server_handshake(server_host, server_port, server_static_pub,
     print(f"← server replied: {session.decrypt_message(reply)}")
     sock.close()
 
+def test_server_handshake_extended(server_host, server_port, server_static_pub,
+                          client_static_priv, client_static_pub):
+    client_eph_priv, client_eph_pub = DH_Generate()
+    sender_index = struct.unpack('<I', os.urandom(4))[0]
+
+    # Build + send initiation
+    packet, ck, h = build_initiation(
+        sender_index, client_static_priv, client_static_pub,
+        server_static_pub, client_eph_priv, client_eph_pub, b'\x00' * 16
+    )
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5.0)
+    sock.sendto(packet, (server_host, server_port))
+    print(f"→ initiation sent ({len(packet)} bytes)")
+
+    # Receive + parse response
+    response, _ = sock.recvfrom(65535)
+    print(f"← response received ({len(response)} bytes)")
+
+    cookie, receiver_index = parse_response_extended(response, server_static_pub)
+
+    mac2 = Mac(cookie, packet[:-16])
+
+    # Replace the mac2 in the original initiation packet with the new calculated mac2
+    final_packet = packet[:-16] + mac2
+    print("✓ first handshake complete, calculated mac2")
+
+    # Use the decrypted cookie to send a new type = 0x1 handshake message, including a calculated mac2
+    # Build + send initiation 2
+    sock.sendto(final_packet, (server_host, server_port))
+    print("✓ cookie applied, resent initiation with valid mac2")
+
+    # Receive + parse response
+    response, _ = sock.recvfrom(65535)
+    print(f"← response received ({len(response)} bytes)")
+
+    send_key, recv_key, receiver_index = parse_response(
+        response, client_eph_priv, client_static_priv,
+        server_static_pub, b'\x00' * 32, ck, h
+    )
+    print("✓ second handshake complete, transport keys derived")
+
+    # Send one encrypted message
+    session = TransportSession(send_key, recv_key, sender_index, receiver_index)
+    request_handle = random.randint(0, 0xFFFFFFFF)
+    payload = msgpack.packb({
+        "request_type": 1,
+        "request_handle": request_handle
+    })
+    sock.sendto(session.encrypt_message(payload), (server_host, server_port))
+    print(f"→ sent encrypted: {payload}")
+
+    reply, _ = sock.recvfrom(65535)
+    print(f"← server replied: {session.decrypt_message(reply)}")
+    sock.close()
+
 def main():
     SERVER_HOST = "csc4026z.link"
     SERVER_PORT = 51820
-
+    SERVER_PORT_EXTENDED = 51821
+    
     print('Enter client private key (base64): ')
     client_static_priv = base64.b64decode(input())
     client_static_pub  = bytes(nacl.public.PrivateKey(client_static_priv).public_key)
     print('Enter server public key (base64): ')
     SERVER_STATIC_PUB  = base64.b64decode(input())
-    test_server_handshake(SERVER_HOST, SERVER_PORT, SERVER_STATIC_PUB,
-                          client_static_priv, client_static_pub)
+    #test_server_handshake(SERVER_HOST, SERVER_PORT, SERVER_STATIC_PUB, client_static_priv, client_static_pub)
+    test_server_handshake_extended(SERVER_HOST, SERVER_PORT_EXTENDED, SERVER_STATIC_PUB,
+                        client_static_priv, client_static_pub)
 
 if __name__ == "__main__":
     main()

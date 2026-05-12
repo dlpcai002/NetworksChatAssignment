@@ -3,11 +3,11 @@ import msgpack
 import random  #generate request handles
 import threading 
 import time
-
-from encryption import TransportSession, DH_Generate, build_initiation, parse_response, Hash
+from encryption import TransportSession, DH_Generate, build_initiation, parse_response, parse_response_extended, Mac
 import nacl.public
 import base64
 import struct, os
+import time
 
 ##NOTES: 
 # 1. Channel info request
@@ -16,7 +16,8 @@ import struct, os
 
 #server address and cleartext part
 SERVER = ("csc4026z.link", 51825)
-SERVER_WG = ("csc4026z.link", 51820)   # WireGuard port
+SERVER_WG = ("csc4026z.link", 51820)   # WireGuard encrypted port
+SERVER_WGE = ("csc4026z.link", 51821)   # WireGuard extended encrypted port
 
 class EncryptedSocket:
     """
@@ -83,7 +84,7 @@ def make_encrypted_socket():
     # Build WireGuard-style initiation packet
     packet, ck, h = build_initiation(
         sender_index, client_static_priv, client_static_pub,
-        server_static_pub, client_eph_priv, client_eph_pub
+        server_static_pub, client_eph_priv, client_eph_pub, b'\x00' * 16
     )
 
     # Send handshake initiation to server
@@ -96,6 +97,74 @@ def make_encrypted_socket():
     send_key, recv_key, receiver_index = parse_response(
         response, client_eph_priv, client_static_priv,
         server_static_pub, b'\x00' * 32, ck, h)
+
+    # Create encrypted transport session
+    session = TransportSession(send_key, recv_key, sender_index, receiver_index)
+
+    print("✓ WireGuard handshake complete")
+
+    # Remove timeout after successful handshake
+    raw_sock.settimeout(None)
+
+    # Return encrypted socket wrapper
+    return EncryptedSocket(session, raw_sock, SERVER_WG)
+
+def make_encrypted_socket_extended():
+    # Read client's long-term private key from user
+    print('Enter client private key (base64): ')
+    client_static_priv = base64.b64decode(input())
+    # Generate matching public key from private key
+    client_static_pub  = bytes(nacl.public.PrivateKey(client_static_priv).public_key)
+    # Read server's public key
+    print('Enter server public key (base64): ')
+    server_static_pub  = base64.b64decode(input())
+
+    # Generate temporary ephemeral DH keypair for handshake
+    client_eph_priv, client_eph_pub = DH_Generate()
+
+    # Random identifier for this client session
+    sender_index = struct.unpack('<I', os.urandom(4))[0]
+
+    # Create UDP socket used for encrypted communication
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sock.settimeout(5.0)
+
+    # ---------------- Handshake Phase ----------------
+    
+    # Build WireGuard-style initiation packet
+    packet, ck, h = build_initiation(
+        sender_index, client_static_priv, client_static_pub,
+        server_static_pub, client_eph_priv, client_eph_pub, b'\x00' * 16
+    )
+
+    # Send handshake initiation to server
+    raw_sock.sendto(packet, SERVER_WGE)
+
+    # Receive handshake response from server
+    response, _ = raw_sock.recvfrom(65535)
+
+    cookie, receiver_index = parse_response_extended(response, server_static_pub)
+
+    mac2 = Mac(cookie, packet[:-16])
+
+    # Replace the mac2 in the original initiation packet with the new calculated mac2
+    final_packet = packet[:-16] + mac2
+    print("✓ first handshake complete, calculated mac2")
+
+    # Use the decrypted cookie to send a new type = 0x1 handshake message, including a calculated mac2
+    # Build + send initiation 2
+    raw_sock.sendto(final_packet, SERVER_WGE)
+    print("✓ cookie applied, resent initiation with valid mac2")
+
+    # Receive + parse response
+    response, _ = raw_sock.recvfrom(65535)
+    print(f"← response received ({len(response)} bytes)")
+
+    send_key, recv_key, receiver_index = parse_response(
+        response, client_eph_priv, client_static_priv,
+        server_static_pub, b'\x00' * 32, ck, h
+    )
+    print("✓ second handshake complete, transport keys derived")
 
     # Create encrypted transport session
     session = TransportSession(send_key, recv_key, sender_index, receiver_index)
@@ -261,18 +330,30 @@ def receive_messages(sock):
 
 
 def main():
-    #User chooses whether they would like to use the Cleartext socket or Encrypted socket
-    print('Would you like use encrypted chat? (Respond with Y/N)')
-    choice = input()
+    #User chooses whether they would like to use the Cleartext, Encrypted or Extended Encrypted socket
+    while(True):
+        print('Please enter the number for the type of chat you would like to use:\n(1) Encrypted Chat' \
+        '\n(2) Extended Encrypted Chat\n(3) Cleartext Chat')
+        choice = input()
+        if(choice == '1'):
+            #UDP socket creation for Encrypted Chat
+            print('Starting Encrypted Chat...')
+            sock = make_encrypted_socket()
+            break
+        elif(choice == '2'):
+            #UDP socket creation for Extended Encrypted Chat
+            print('Starting Extended Encrypted Chat...')
+            sock = make_encrypted_socket_extended()
+            break
+        elif(choice == '3'):
+            #UDP socket creation for Cleartext Chat
+            print('Starting Cleartext Chat...')
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            break
+        else:
+            print('ERROR - Please enter a valid number for your choice: 1, 2 or 3')
+            time.sleep(2.0)
 
-    if(choice == 'Y' or choice == 'y'):
-        #UDP socket creation for Encrypted Chat
-        print('Starting Encrypted Chat...')
-        sock = make_encrypted_socket()
-    elif(choice == 'N' or choice == 'n'):
-        #UDP socket creation for Cleartext Chat
-        print('Starting Cleartext Chat...')
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     channel_name = "team-chat"
 
@@ -284,7 +365,7 @@ def main():
     print("Connected. Session= ", session)
     
     #Set user and join channel
-    my_username = "clear-david"
+    my_username = "clear-to-be-or-not-to-be"
     set_username(sock, session, my_username)
     time.sleep(0.3)
     sock.recvfrom(4096)  # Consume username set response
