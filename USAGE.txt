@@ -1,0 +1,72 @@
+# Gemini Chat Client - Usage Guide
+
+## Initial Setup
+When you run `python3 client.py`, you will be prompted to:
+1. **Choose Chat Type**:
+   - (1) Encrypted Chat (WireGuard Handshake)
+   - (2) Extended Encrypted Chat (WireGuard + Mac2/Cookies)
+   - (3) Cleartext Chat
+2. **Handshake (Encrypted only)**: Provide client private key and server public key.
+3. **Automatic Connection**: The client will automatically connect, set a default username, and join "team-chat".
+
+---
+
+## Interactive Commands (Inside Chat)
+While the chat is active, you can use the following commands:
+
+### Messaging
+- **Send to Channel**: Just type your message and press Enter to send it to the default channel ("team-chat").
+- **Direct Message**: `/dm <username> <message>`
+  - Example: `/dm clear-alice Hello there!`
+
+### Channel Management
+- **List Channels**: `/channels [offset]`
+  - Shows available channels on the server.
+  - `[offset]`: Optional. Pagination offset (e.g., 10 to see the next page).
+- **Create Channel**: `/create <channel_name> [description]`
+  - `channel_name`: Letters, numbers, underscores, and dashes only (max 20 chars).
+  - `description`: Optional text (max 100 chars).
+  - Automatically sets this as your **active channel**.
+- **Join Channel**: `/join <channel_name>`
+  - Join an existing channel.
+  - Automatically sets this as your **active channel**.
+- **Switch Active Channel**: `/switch [channel_name]`
+  - Change which channel your messages are sent to without leaving others.
+  - Omit `[channel_name]` to clear the active channel focus (exit the current channel view).
+- **Get Channel Info**: `/info <channel_name>`
+  - Shows description and member list.
+- **Leave Channel**: `/leave <channel_name>`
+  - Note: If you are the last user, the channel is deleted.
+  - If you leave your active channel, the active channel is cleared.
+
+### Active Channel
+Your current active channel is shown in the prompt: `[channel_name] > `. 
+Any message you type that is NOT a command will be sent to this channel.
+You must join or switch to a channel before you can send messages.
+
+### User Management
+- **List Users**: `/users [channel] [offset]`
+  - `[channel]`: Optional. Filter by channel name (use `None` to skip to offset without filtering).
+  - `[offset]`: Optional. Pagination offset (e.g., 20 to see the next page).
+  - Example: `/users team-chat`
+  - Example: `/users None 20`
+- **Who Am I**: `/whoami`
+  - Returns your current username as seen by the server.
+- **Who Is**: `/whois <username>`
+  - Returns details about a user: transport type, public key (if any), and joined channels.
+- **Change Username**: `/set_username <new_username>`
+  - Cleartext users: Must start with `clear-` (automatically prepended if missing).
+  - Rule: Cannot contain the character `:`.
+  - Rule: Must be unique.
+
+### System
+- **Exit**: `/exit` (or Ctrl+C)
+  - Properly closes the socket and ends the session.
+
+---
+
+## Response Types to Note
+- **[BROADCAST]**: System-wide messages from the server.
+- **[SHUTDOWN]**: Server is going down; your session will be destroyed.
+- **[INFO]**: Notifications about users joining, leaving, or changing names.
+- **Error**: Displays delivery failures or invalid requests.
