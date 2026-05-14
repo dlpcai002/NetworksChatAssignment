@@ -9,11 +9,6 @@ import base64
 import struct, os
 import time
 
-##NOTES: 
-# 1. Channel info request
-# 2. Leave Channel
-# 3. User message request
-
 #server address and cleartext part
 SERVER = ("csc4026z.link", 51825)
 SERVER_WG = ("csc4026z.link", 51820)   # WireGuard encrypted port
@@ -50,8 +45,6 @@ class AsyncEncryptedSocket:
 
     async def sendto(self, data: bytes, addr=None):
         """Encrypt and send data."""
-        # Use None as the target address if it matches the default server_addr
-        # to avoid ValueError in connected asyncio transports.
         if addr is None or addr == self.server_addr:
             target_addr = None
         else:
@@ -72,7 +65,6 @@ class AsyncEncryptedSocket:
                 return plaintext, addr
             except Exception as e:
                 print(f"Decryption error: {e}")
-                # Return empty bytes or handle appropriately
                 return b"", addr
         return raw, addr
 
@@ -305,7 +297,7 @@ async def create_channel(sock, session, channel_name, description=""):
         "session": session,
         "request_handle": random.randrange(0, 2**32),
         "channel": channel_name[:20],
-        "description": description[:100]  # Ensure it doesn't exceed 100 characters
+        "description": description[:100]
     }
     await sock.sendto(msgpack.packb(request))
     
@@ -351,9 +343,9 @@ async def whoami(sock, session):
 async def whois(sock, session, target_username):
     request = {
         "request_type": 10,
-        "session": session,
+        "session": int(session) & 0xFFFFFFFF,
         "request_handle": random.randrange(0, 2**32),
-        "username": target_username[:20]
+        "username": target_username
     }
     await sock.sendto(msgpack.packb(request))
    
@@ -361,10 +353,10 @@ async def whois(sock, session, target_username):
 async def send_message(sock, session, channel_name, message_text):
     request = {
         "request_type": 9, 
-        "session": session, 
+        "session": int(session) & 0xFFFFFFFF, 
         "request_handle": random.randrange(0, 2**32),
-        "channel": channel_name[:20],
-        "message": message_text[:500]
+        "channel": channel_name,
+        "message": message_text
         
     }
     
@@ -373,10 +365,10 @@ async def send_message(sock, session, channel_name, message_text):
 async def send_direct_message(sock, session, recipient_username, message_text):
     request = {
         "request_type": 12,
-        "session": session,
+        "session": int(session) & 0xFFFFFFFF,
         "request_handle": random.randrange(0, 2**32),
-        "to_username": recipient_username[:20],
-        "message": message_text[:500]
+        "to_username": recipient_username,
+        "message": message_text
     }
     await sock.sendto(msgpack.packb(request))
     
@@ -390,296 +382,68 @@ async def disconnect(sock, session):
     
     await sock.sendto(msgpack.packb(request))
 
-async def receive_messages(sock):
-    print("Listening for incoming messages...")
+# This interface defines all possible actions the app can take when it receives data from the server
+class ResponseHandler:
+    """Interface for handling server responses."""
+    def handle_user_list(self, users, next_page): pass
+    def handle_channel_list(self, channels, next_page): pass
+    def handle_channel_info(self, channel, desc, members): pass
+    def handle_channel_join(self, username, channel, desc): pass
+    def handle_channel_leave(self, username, channel): pass
+    def handle_username_change(self, old_name, new_name): pass
+    def handle_whoami(self, username): pass
+    def handle_whois(self, username, channels, transport, pubkey): pass
+    def handle_dm(self, from_username, content): pass
+    def handle_channel_message(self, sender, content, channel): pass
+    def handle_error(self, error_msg): pass
+    def handle_ok(self): pass
+    def handle_disconnect(self, message): pass
+    def handle_ping(self): pass
+    def handle_broadcast(self, message): pass
+    def handle_shutdown(self, message): pass
+
+# This function looks at the 'response_type' number from the server and calls the correct function above
+def process_response(data, handler: ResponseHandler):
+    """Universal dispatcher for server responses."""
+    if "response_type" not in data:
+        return
+
+    rtype = data["response_type"]
+    # Map numeric server codes to the readable functions in the handler
+    if rtype == 35: handler.handle_user_list(data.get("users", []), data.get("next_page", False))
+    elif rtype == 26: handler.handle_channel_list(data.get("channels", []), data.get("next_page", False))
+    elif rtype == 27: handler.handle_channel_info(data.get("channel", ""), data.get("description", ""), data.get("members", []))
+    elif rtype == 28: handler.handle_channel_join(data.get("username", ""), data.get("channel", ""), data.get("description", ""))
+    elif rtype == 29: handler.handle_channel_leave(data.get("username", ""), data.get("channel", ""))
+    elif rtype == 34: handler.handle_username_change(data.get("old_username", ""), data.get("new_username", ""))
+    elif rtype == 32: handler.handle_whoami(data.get("username", ""))
+    elif rtype == 31: handler.handle_whois(data.get("username", ""), data.get("channels", []), data.get("transport", ""), data.get("wireguard_public_key", ""))
+    elif rtype == 33: handler.handle_dm(data.get("from_username", ""), data.get("message", ""))
+    elif rtype == 30: handler.handle_channel_message(data.get("username", ""), data.get("message", ""), data.get("channel", ""))
+    elif rtype == 20: handler.handle_error(data.get("error", "Unknown error"))
+    elif rtype == 21: handler.handle_ok()
+    elif rtype == 23: handler.handle_disconnect(data.get("message", "Farewell!"))
+    elif rtype == 24: handler.handle_ping()
+    elif rtype == 36: handler.handle_broadcast(data.get("message", ""))
+    elif rtype == 37: handler.handle_shutdown(data.get("message", ""))
+
+async def receive_messages(sock, handler: ResponseHandler):
+    """Background task to receive and dispatch messages."""
     while True:
         try:
             response, addr = await sock.recvfrom()
-            if not response:
-                continue
-            data = msgpack.unpackb(response)
-                 
-            
-            if "response_type" in data:
-                response_type = data["response_type"]
-                if response_type == 35:  # User list response
-                    users = data.get("users", [])
-                    next_page = data.get("next_page", False)
-                    print("\nCurrent users:", ", ".join(users))
-                    if next_page:
-                        print("(More users available on next page)")
-                    print("> ", end="")
-                elif response_type == 26:  # Channel list response
-                    channels = data.get("channels", [])
-                    next_page = data.get("next_page", False)
-                    print("\nAvailable channels:", ", ".join(channels))
-                    if next_page:
-                        print("(More channels available on next page)")
-                    print("> ", end="")
-                elif response_type == 27:  # Channel info response
-                    channel = data.get("channel", "Unknown")
-                    desc = data.get("description", "")
-                    members = data.get("members", [])
-                    print(f"\n--- Channel Info: {channel} ---")
-                    print(f"Description: {desc}")
-                    print(f"Members: {', '.join(members)}")
-                    print("> ", end="")
-                elif response_type == 28:  # Channel join response
-                    username = data.get("username", "Unknown")
-                    channel = data.get("channel", "Unknown")
-                    desc = data.get("description", "")
-                    print(f"\n[INFO] {username} joined channel: {channel}")
-                    if desc:
-                        print(f"Channel Description: {desc}")
-                    print("> ", end="")
-                elif response_type == 29:  # Channel leave response
-                    username = data.get("username", "Unknown")
-                    channel = data.get("channel", "Unknown")
-                    print(f"\n[INFO] {username} has left channel: {channel}")
-                    print("> ", end="")
-                elif response_type == 34:  # Set username response
-                    old_name = data.get("old_username", "Unknown")
-                    new_name = data.get("new_username", "Unknown")
-                    print(f"\n[INFO] Username change: {old_name} is now known as {new_name}")
-                    print("> ", end="")
-                elif response_type == 32:  # WHOAMI response
-                    username = data.get("username", "Unknown")
-                    print(f"\n[INFO] You are currently: {username}")
-                    print("> ", end="")
-                elif response_type == 31:  # WHOIS response
-                    username = data.get("username", "Unknown")
-                    channels = data.get("channels", [])
-                    transport = data.get("transport", "Unknown")
-                    pubkey = data.get("wireguard_public_key", "")
-                    print(f"\n--- User Info: {username} ---")
-                    print(f"Transport: {transport}")
-                    if pubkey:
-                        print(f"Public Key: {pubkey}")
-                    print(f"Channels: {', '.join(channels)}")
-                    print("> ", end="")
-                elif response_type == 33:
-                    from_username = data.get("from_username", "Unknown")
-                    content = data.get("message", "")
-                    print(f"\n[DM] {from_username}: {content}")
-                elif response_type == 30:
-                    sender = data.get("username", "Unknown")
-                    content = data.get("message", "")
-                    channel = data.get("channel", "Unknown")
-                    print(f"\n[{channel}] {sender}: {content}")
-                elif response_type == 20:
-                    if "error" in data:
-                        print("\nError:", data["error"])
-                    else:
-                        print("\nMessage delivered")
-                    print("> ", end="")
-                elif response_type == 21:  # OK response
-                    # Silently acknowledge OK for most requests
-                    pass
-                elif response_type == 23:  # DISCONNECT response
-                    print(f"\n[INFO] Disconnected: {data.get('message', 'Farewell!')}")
-                    print("> ", end="")
-                elif response_type == 24:  # PING response
-                    # Silently acknowledge PING
-                    pass
-                elif response_type == 36:  # SERVER_MESSAGE (Broadcast)
-                    print(f"\n[BROADCAST] {data.get('message', '')}")
-                    print("> ", end="")
-                elif response_type == 37:  # SERVER_SHUTDOWN
-                    print(f"\n[SHUTDOWN] Server is going down: {data.get('message', '')}")
-                    # Requirement: Destroy session state
-                    if hasattr(sock, 'session'):
-                        sock.session = None
-                    print("> ", end="")
-            
+            if not response: continue
+            data = msgpack.unpackb(response, raw=False)
+            process_response(data, handler)
         except Exception as e:
-            print(f"Error in receiver: {e}")
-            break
+            # Re-raise or handle if needed by the GUI
+            raise e
             
         #print("\nIncoming messages:", data)
 
 
-async def main():
-    loop = asyncio.get_running_loop()
-    #User chooses whether they would like to use the Cleartext, Encrypted or Extended Encrypted socket
-    while(True):
-        print('Please enter the number for the type of chat you would like to use:\n(1) Encrypted Chat' \
-        '\n(2) Extended Encrypted Chat\n(3) Cleartext Chat')
-        # Use run_in_executor for blocking input
-        choice = await loop.run_in_executor(None, input)
-        if(choice == '1'):
-            #UDP socket creation for Encrypted Chat
-            print('Starting Encrypted Chat...')
-            sock = await make_encrypted_socket()
-            if not sock: return
-            break
-        elif(choice == '2'):
-            #UDP socket creation for Extended Encrypted Chat
-            print('Starting Extended Encrypted Chat...')
-            sock = await make_encrypted_socket_extended()
-            if not sock: return
-            break
-        elif(choice == '3'):
-            #UDP socket creation for Cleartext Chat
-            print('Starting Cleartext Chat...')
-            transport, protocol = await loop.create_datagram_endpoint(
-                lambda: AsyncWireGuardProtocol(),
-                remote_addr=SERVER
-            )
-            sock = AsyncEncryptedSocket(None, transport, protocol, SERVER)
-            break
-        else:
-            print('ERROR - Please enter a valid number for your choice: 1, 2 or 3')
-            await asyncio.sleep(2.0)
-
-
-    #connect, store session
-    await connect(sock)
-    reponse, addr = await sock.recvfrom()
-    data = msgpack.unpackb(reponse)
-    session = data.get("session")
-    welcome_msg = data.get("message", "")
-    server_username = data.get("username", "Unknown")
-    
-    print(f"Connected! Session={session}")
-    if welcome_msg:
-        print(f"Server: {welcome_msg}")
-    print(f"Assigned username: {server_username}")
-    
-    # Start background tasks early so we can see updates
-    receiver_task = asyncio.create_task(receive_messages(sock))
-    
-    active_channel = None
-    
-    print("Commands: Type your message and hit Enter. (Ctrl+C to exit)")
-    
-    async def keep_alive():
-        try:
-            while True:
-                await ping(sock, session)
-                await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            pass
-            
-    keep_alive_task = asyncio.create_task(keep_alive())
-    
-    #print("CHAT ACTIVE. Use '/dm username message' to send direct messages or just message in channel")
-    
-    try:
-        while True:
-            # Use run_in_executor for blocking input
-            prompt = f"[{active_channel}] > " if active_channel else "> "
-            message_text = await loop.run_in_executor(None, lambda: input(prompt))
-            
-            if not message_text:
-                continue
-
-            # Normalize input for command checking
-            trimmed_text = message_text.strip()
-            parts = trimmed_text.split(" ", 1)
-            cmd = parts[0].lower()
-            args = parts[1] if len(parts) > 1 else ""
-
-            if cmd == "/exit":
-                break
-            
-            if cmd == "/dm":
-                if not args or " " not in args:
-                    print("Usage: /dm username message")
-                    continue
-                recipient_username, dm_message = args.split(" ", 1)
-                await send_direct_message(sock, session, recipient_username, dm_message)
-            elif cmd == "/create":
-                if not args:
-                    print("Usage: /create channel_name [description]")
-                    continue
-                create_parts = args.split(" ", 1)
-                new_chan = create_parts[0]
-                new_desc = create_parts[1] if len(create_parts) > 1 else ""
-                await create_channel(sock, session, new_chan, new_desc)
-                active_channel = new_chan
-            elif cmd == "/join":
-                if not args:
-                    print("Usage: /join channel_name")
-                    continue
-                target_channel = args
-                await join_channel(sock, session, target_channel)
-                active_channel = target_channel
-            elif cmd == "/switch":
-                if not args:
-                    active_channel = None
-                    print("Active channel cleared. Use /join or /switch <channel> to set a new one.")
-                else:
-                    active_channel = args
-                    print(f"Switched active channel to: {active_channel}")
-            elif cmd == "/info":
-                if not args:
-                    print("Usage: /info channel_name")
-                    continue
-                await get_channel_info(sock, session, args)
-            elif cmd == "/leave":
-                if not args:
-                    print("Usage: /leave channel_name")
-                    continue
-                target_channel = args
-                await leave_channel(sock, session, target_channel)
-                if active_channel == target_channel:
-                    active_channel = None
-                    print("Active channel cleared.")
-            elif cmd == "/whoami":
-                await whoami(sock, session)
-            elif cmd == "/whois":
-                if not args:
-                    print("Usage: /whois username")
-                    continue
-                await whois(sock, session, args)
-            elif cmd == "/users":
-                channel = None
-                offset = None
-                user_parts = args.split(" ") if args else []
-                if len(user_parts) > 0 and user_parts[0]:
-                    channel = user_parts[0]
-                if len(user_parts) > 1:
-                    try:
-                        offset = int(user_parts[1])
-                    except ValueError:
-                        print("Offset must be an integer")
-                        continue
-                await list_users(sock, session, channel, offset)
-            elif cmd == "/channels":
-                offset = None
-                if args:
-                    try:
-                        offset = int(args)
-                    except ValueError:
-                        print("Offset must be an integer")
-                        continue
-                await list_channels(sock, session, offset)
-            elif cmd == "/set_username":
-                if not args:
-                    print("Usage: /set_username new_username")
-                    continue
-                await set_username(sock, session, args)
-            elif message_text.startswith("/"):
-                print(f"Unknown command: {cmd}")
-            else:
-                if active_channel:
-                    await send_message(sock, session, active_channel, message_text)
-                else:
-                    print("Error: No active channel. Use /join <channel> or /switch <channel> first.")
-                
-    except (KeyboardInterrupt, asyncio.CancelledError, EOFError):
-        print("\nExiting...")
-    finally:
-        keep_alive_task.cancel()
-        receiver_task.cancel()
-        sock.close()
-        print("Goodbye!")
-    
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    print("This file is now a library for the GUI. Please run gui.py instead.")
    
     
     
