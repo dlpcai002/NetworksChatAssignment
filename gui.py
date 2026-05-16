@@ -322,6 +322,9 @@ class ChatWindow(QMainWindow):
             self.sock.close()
             self.sock = None
             self.session_id = None
+        
+        self.active_channel = None
+        self.joined_channels = set()
 
     # Clears the UI and returns to the login screen
     @asyncSlot()
@@ -453,6 +456,15 @@ class ChatWindow(QMainWindow):
         choice = self.conn_type_combo.currentIndex()
         self.connect_btn.setEnabled(False)
         self.status_label.setText("Connecting...")
+        
+        # Reset session state for a fresh start
+        self.active_channel = None
+        self.joined_channels = set()
+        self.chat_history.clear()
+        self.user_list.clear()
+        self.channel_list.clear()
+        self.username_label.setText("Loading...")
+        self.leave_btn.setVisible(False)
         
         try:
             if choice == 0:
@@ -663,7 +675,14 @@ class ChatWindow(QMainWindow):
             self.chat_history.append(f"<font color='red'><b>[SHUTDOWN] {msg}</b></font>")
             self.sock = None
             self.session_id = None
+            self.active_channel = None
+            self.joined_channels = set()
             self.status_label.setText("Disconnected (Server Shutdown)")
+            self.leave_btn.setVisible(False)
+            self.user_list.clear()
+            # We don't clear channel_list so user can see what was there? 
+            # Actually, better clear it as it might be invalid now.
+            self.channel_list.clear()
         elif rtype == 21:
             pass
         elif rtype == 24:
