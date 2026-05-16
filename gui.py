@@ -97,6 +97,8 @@ class ChatWindow(QMainWindow):
         self.sock = None
         self.session_id = None
         self.active_channel = None
+        self.receive_task = None
+        self.keep_alive_task = None
         self.joined_channels = set()
         self.signals = ChatClientSignals()
 
@@ -305,6 +307,13 @@ class ChatWindow(QMainWindow):
 
     # Tells the server we are leaving and closes the network socket
     async def perform_disconnect(self):
+        if self.receive_task:
+            self.receive_task.cancel()
+            self.receive_task = None
+        if self.keep_alive_task:
+            self.keep_alive_task.cancel()
+            self.keep_alive_task = None
+
         if self.sock and self.session_id:
             try:
                 await disconnect(self.sock, self.session_id)
@@ -479,8 +488,8 @@ class ChatWindow(QMainWindow):
             self.status_label.setText("Connected")
             self.central_widget.setCurrentIndex(1)
             
-            asyncio.create_task(self.receive_loop())
-            asyncio.create_task(self.keep_alive_loop())
+            self.receive_task = asyncio.create_task(self.receive_loop())
+            self.keep_alive_task = asyncio.create_task(self.keep_alive_loop())
             
             await list_channels(self.sock, self.session_id)
             await list_users(self.sock, self.session_id)
@@ -556,22 +565,24 @@ class ChatWindow(QMainWindow):
         handler = GUIResponseHandler(self.signals)
         try:
             await receive_messages(self.sock, handler)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             if self.sock:
                 self.signals.error_occurred.emit(f"Receiver error: {e}")
 
     # Sends periodic pings to keep the connection alive
     async def keep_alive_loop(self):
-        while self.sock and self.session_id:
-            try:
-                await ping(self.sock, self.session_id)
-            except Exception as e:
-                self.chat_history.append(f"<font color='red'>Ping failed: {e}</font>")
-            
-            try:
+        try:
+            while self.sock and self.session_id:
+                try:
+                    await ping(self.sock, self.session_id)
+                except Exception as e:
+                    self.chat_history.append(f"<font color='red'>Ping failed: {e}</font>")
+                
                 await asyncio.sleep(30)
-            except asyncio.CancelledError:
-                break
+        except asyncio.CancelledError:
+            pass
 
     # Processes data received from the server and updates the UI
     @Slot(dict)
