@@ -398,7 +398,7 @@ class ResponseHandler:
     def handle_error(self, error_msg): pass
     def handle_ok(self): pass
     def handle_disconnect(self, message): pass
-    def handle_ping(self): pass
+    def handle_ping(self, data): pass
     def handle_broadcast(self, message): pass
     def handle_shutdown(self, message): pass
 
@@ -423,7 +423,7 @@ def process_response(data, handler: ResponseHandler):
     elif rtype == 20: handler.handle_error(data.get("error", "Unknown error"))
     elif rtype == 21: handler.handle_ok()
     elif rtype == 23: handler.handle_disconnect(data.get("message", "Farewell!"))
-    elif rtype == 24: handler.handle_ping()
+    elif rtype == 24: handler.handle_ping(data)
     elif rtype == 36: handler.handle_broadcast(data.get("message", ""))
     elif rtype == 37: handler.handle_shutdown(data.get("message", ""))
 

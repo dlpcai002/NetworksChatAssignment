@@ -8,7 +8,7 @@ import msgpack
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QPushButton, QComboBox, QLabel, QStackedWidget,
-    QFormLayout, QMessageBox, QListWidget, QSplitter
+    QFormLayout, QMessageBox, QListWidget, QSplitter, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Slot, Signal, QObject
 from qasync import QEventLoop, asyncSlot
@@ -72,6 +72,9 @@ class GUIResponseHandler(ResponseHandler):
     def handle_disconnect(self, message):
         self.signals.message_received.emit({"response_type": 23, "message": message})
     
+    def handle_ping(self, data):
+        self.signals.message_received.emit(data)
+
     def handle_broadcast(self, message):
         self.signals.message_received.emit({"response_type": 36, "message": message})
     
@@ -131,6 +134,33 @@ class ChatWindow(QMainWindow):
         layout.addRow("Server Public Key:", self.server_pub_input)
         layout.addRow(self.connect_btn)
 
+        # Usage Information Section
+        info_group = QWidget()
+        info_layout = QVBoxLayout(info_group)
+        info_layout.setContentsMargins(0, 20, 0, 0)
+        
+        info_header = QLabel("Quick Start Guide:")
+        info_header.setStyleSheet("font-weight: bold; color: #7b1fa2; font-size: 14px;")
+        info_layout.addWidget(info_header)
+        
+        usage_tips = [
+            "• <b>Channels:</b> Click a channel in the list to join and start chatting.",
+            "• <b>Channel Switch:</b> A user can be part of multiple channels. Click a specific channel to switch between them.",
+            "• <b>User Info:</b> Click a username to see their details and active channels.",
+            "• <b>Direct Messages:</b> Double-click a username to start a private chat.",
+            "• <b>Deselecting:</b> Use 'Exit current channel' to stop viewing a channel without leaving it. This will allow you to view all active users on the server and not just in a selected channel.",
+            "• <b>Set Username:</b> Change your display name using the 'Edit' button next to your username at the top left of the screen.",
+            "• <b>Security:</b> Use Encrypted modes for secure, end-to-end communication."
+        ]
+        
+        for tip in usage_tips:
+            tip_label = QLabel(tip)
+            tip_label.setWordWrap(True)
+            tip_label.setStyleSheet("color: #4a148c; font-size: 12px; margin-top: 2px;")
+            info_layout.addWidget(tip_label)
+            
+        layout.addRow(info_group)
+
         self.central_widget.addWidget(self.login_page)
 
     # Enables or disables key input boxes based on the chat type selected
@@ -176,6 +206,10 @@ class ChatWindow(QMainWindow):
         self.channel_list = QListWidget()
         self.channel_list.itemClicked.connect(self.on_channel_clicked)
         left_layout.addWidget(self.channel_list)
+
+        self.exit_channel_btn = QPushButton("Exit current channel")
+        self.exit_channel_btn.clicked.connect(self.on_exit_channel_btn_clicked)
+        left_layout.addWidget(self.exit_channel_btn)
         
         left_layout.addWidget(QLabel("Users"))
         self.user_list = QListWidget()
@@ -237,24 +271,28 @@ class ChatWindow(QMainWindow):
     @asyncSlot()
     async def on_edit_username_clicked(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
-        
         dialog = QDialog(self)
         dialog.setWindowTitle("Set Username")
         dialog.setMinimumSize(400, 150)
         d_layout = QVBoxLayout(dialog)
-        
+
         d_layout.addWidget(QLabel("Enter new username:"))
         name_in = QLineEdit()
         name_in.setText(self.username_label.text())
         d_layout.addWidget(name_in)
-        
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         d_layout.addStretch()
         d_layout.addWidget(buttons)
-        
-        if dialog.exec() == QDialog.Accepted:
+
+        # Non-blocking wait for dialog
+        future = asyncio.Future()
+        dialog.finished.connect(lambda r: future.set_result(r))
+        dialog.show()
+
+        if await future == QDialog.Accepted:
             new_name = name_in.text().strip()
             if new_name:
                 await set_username(self.sock, self.session_id, new_name)
@@ -309,7 +347,12 @@ class ChatWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         d_layout.addRow(buttons)
         
-        if dialog.exec() == QDialog.Accepted:
+        # Non-blocking wait for dialog
+        future = asyncio.Future()
+        dialog.finished.connect(lambda r: future.set_result(r))
+        dialog.show()
+
+        if await future == QDialog.Accepted:
             name = name_in.text().strip()
             desc = desc_in.text().strip()
             
@@ -349,6 +392,20 @@ class ChatWindow(QMainWindow):
             self.status_label.setText("No active channel")
             self.leave_btn.setVisible(False)
             self.user_list.clear()
+
+    # Deselects the current channel without leaving it (switches to 'none' view)
+    @asyncSlot()
+    async def on_exit_channel_btn_clicked(self):
+        self.active_channel = None
+        self.status_label.setText("Not in any current channel")
+        self.chat_history.append("<i>Not in any current channel</i>")
+        self.leave_btn.setVisible(False)
+        self.user_list.clear()
+        self.channel_list.clearSelection()
+        
+        if self.sock and self.session_id:
+            await list_channels(self.sock, self.session_id)
+            await list_users(self.sock, self.session_id, None)
 
     # Switches the view or joins a channel when it is clicked in the list
     @asyncSlot()
@@ -505,12 +562,16 @@ class ChatWindow(QMainWindow):
 
     # Sends periodic pings to keep the connection alive
     async def keep_alive_loop(self):
-        try:
-            while self.sock and self.session_id:
+        while self.sock and self.session_id:
+            try:
                 await ping(self.sock, self.session_id)
+            except Exception as e:
+                self.chat_history.append(f"<font color='red'>Ping failed: {e}</font>")
+            
+            try:
                 await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                break
 
     # Processes data received from the server and updates the UI
     @Slot(dict)
@@ -616,6 +677,7 @@ class ChatWindow(QMainWindow):
                 recipient = parts[1]
                 msg = parts[2]
                 await send_direct_message(self.sock, self.session_id, recipient, msg)
+                self.chat_history.append(f"<font color='magenta'><i>[DM to {recipient}]: {msg}</i></font>")
             else:
                 self.chat_history.append("<font color='red'>Usage: /dm username message</font>")
         elif self.active_channel:
