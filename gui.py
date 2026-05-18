@@ -108,6 +108,7 @@ class ChatWindow(QMainWindow):
         self.init_login_ui()
         self.init_chat_ui()
 
+        # when the "message recieved" bell goes off, run the handle_message function to show it on screen 
         self.signals.message_received.connect(self.handle_message)
         self.signals.error_occurred.connect(self.show_error)
 

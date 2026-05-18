@@ -89,7 +89,7 @@ async def make_encrypted_socket():
     sender_index = struct.unpack('<I', os.urandom(4))[0]
 
     # Create asynchronous UDP endpoint
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()  # gets "conductor" (event loop) that manages all network communication
     transport, protocol = await loop.create_datagram_endpoint(
         lambda: AsyncWireGuardProtocol(),
         remote_addr=SERVER_WG
@@ -427,6 +427,8 @@ def process_response(data, handler: ResponseHandler):
     elif rtype == 36: handler.handle_broadcast(data.get("message", ""))
     elif rtype == 37: handler.handle_shutdown(data.get("message", ""))
 
+# "listener", async loop runs in background, wait for data without freezing loop
+#upon arrival, it gives data to the process_response along with the handler
 async def receive_messages(sock, handler: ResponseHandler):
     """Background task to receive and dispatch messages."""
     while True:
